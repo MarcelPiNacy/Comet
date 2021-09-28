@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <utility>
+#include <type_traits>
 
 #undef Yield
 
@@ -218,6 +219,20 @@ namespace Comet
 		return r;
 	}
 
+	namespace Impl
+	{
+		template <typename T>
+		constexpr bool is_lambda = !(
+			std::is_trivially_constructible_v<T> &&
+			std::is_trivially_copyable_v<T> &&
+			std::is_trivially_destructible_v<T> &&
+			std::is_class_v<T> &&
+			std::is_empty_v<T>);
+
+		template <typename T>
+		using enable_if_lambda = std::enable_if_t<is_lambda<T>>;
+	}
+
 	template <typename I>
 	bool ForEach(I begin, I end, void(*body)(I value), TaskOptions options = {})
 	{
@@ -245,8 +260,8 @@ namespace Comet
 		return true;
 	}
 
-	template <typename I, typename J, typename F>
-	bool ForEachGeneric(I begin, J end, F&& body, TaskOptions options = {})
+	template <typename I, typename J, typename F, typename = Impl::enable_if_lambda<F>>
+	bool ForEach(I begin, J end, F&& body, TaskOptions options = {})
 	{
 		if (begin == end)
 			return true;
