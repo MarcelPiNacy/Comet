@@ -47,6 +47,21 @@ namespace Comet
 		MaxEnum
 	};
 
+	enum class DispatchResult : uint8_t
+	{
+		Success,
+		Sequential,
+		Failure
+	};
+
+	enum class DispatchErrorPolicy : uint8_t
+	{
+		RunSequentially,
+		Spin,
+		Return,
+		Abort
+	};
+
 #define COMET_DEFINE_COMMON_FUNCTIONS(TYPE)	\
 	TYPE(const TYPE&) = delete;				\
 	TYPE& operator=(const TYPE&) = delete;	\
@@ -61,6 +76,11 @@ namespace Comet
 
 		void		Signal();
 		void		Await();
+
+		constexpr void Reset()
+		{
+			state = UINT32_MAX;
+		}
 	};
 
 	struct alignas(16) Counter
@@ -90,6 +110,7 @@ namespace Comet
 		void		Unlock();
 	};
 
+	/* @TODO
 	struct Mutex
 	{
 		uint64_t state[2];
@@ -102,6 +123,7 @@ namespace Comet
 		bool		TryLock();
 		void		Unlock();
 	};
+	*/
 
 	struct MCSMutex
 	{
@@ -140,7 +162,7 @@ namespace Comet
 	{
 		const uint32_t* preferred_thread;
 		Counter* counter;
-		bool force_acquire;
+		DispatchErrorPolicy error_policy;
 		uint8_t priority;
 
 		static constexpr TaskOptions Default() { return {}; }
@@ -156,8 +178,8 @@ namespace Comet
 	void			Terminate();
 	SchedulerState	GetSchedulerState();
 	bool			IsTask();
-	bool			Dispatch(void(*fn)(void* param), void* param);
-	bool			Dispatch(void(*fn)(void* param), void* param, TaskOptions options);
+	DispatchResult	Dispatch(void(*fn)(void* param), void* param);
+	DispatchResult	Dispatch(void(*fn)(void* param), void* param, TaskOptions options);
 	void			Yield();
 	void			Exit();
 	uint64_t		ThisTaskID();
@@ -202,97 +224,6 @@ namespace Comet
 
 
 
-	template <typename F>
-	bool DispatchLambda(F&& fn, TaskOptions options = {})
-	{
-		struct Context { F fn; Fence fence; };
-		Context c = { std::forward<F>(fn), Fence() };
-		bool r = Dispatch([](void* ptr)
-		{
-			auto& ctx_ref = *(Context*)ptr;
-			F fn = std::move(ctx_ref.fn);
-			ctx_ref.fence.Signal();
-			fn();
-		}, &c, options);
-		if (r)
-			c.fence.Await();
-		return r;
-	}
-
-	namespace Impl
-	{
-		template <typename T>
-		constexpr bool is_lambda = !(
-			std::is_trivially_constructible_v<T> &&
-			std::is_trivially_copyable_v<T> &&
-			std::is_trivially_destructible_v<T> &&
-			std::is_class_v<T> &&
-			std::is_empty_v<T>);
-
-		template <typename T>
-		using enable_if_lambda = std::enable_if_t<is_lambda<T>>;
-	}
-
-	template <typename I>
-	bool ForEach(I begin, I end, void(*body)(I value), TaskOptions options = {})
-	{
-		using F = decltype(body);
-		if (begin == end)
-			return true;
-		assert(end > begin);
-		struct Context { F fn; I it; Fence fence; };
-		Context c = { body, begin, Fence() };
-		for (; c.it < end; ++c.it)
-		{
-			bool flag = Dispatch([](void* ptr)
-			{
-				auto& ctx_ref = *(Context*)ptr;
-				auto fn = ctx_ref.fn;
-				auto it = ctx_ref.it;
-				ctx_ref.fence.Signal();
-				fn(it);
-			}, &c, options);
-			if (!flag)
-				c.fn(c.it);
-			else
-				c.fence.Await();
-		}
-		return true;
-	}
-
-	template <typename I, typename J, typename F, typename = Impl::enable_if_lambda<F>>
-	bool ForEach(I begin, J end, F&& body, TaskOptions options = {})
-	{
-		if (begin == end)
-			return true;
-		assert(end > begin);
-		struct Context { F fn; I it; Fence fence; };
-		Context c = { std::forward<F>(body), begin, Fence() };
-		assert(options.counter == nullptr);
-		Counter ctr = end - begin;
-		options.counter = &ctr;
-		for (; c.it < end; ++c.it)
-		{
-			bool flag = Dispatch([](void* ptr)
-			{
-				auto& ctx = *(Context*)ptr;
-				I it = ctx.it;
-				ctx.fence.Signal();
-				ctx.fn(it);
-			}, &c, options);
-			if (!flag)
-			{
-				c.fn(c.it);
-				ctr.Decrement();
-			}
-			else
-			{
-				c.fence.Await();
-			}
-		}
-		ctr.Await();
-		return true;
-	}
 
 	template <typename F>
 	void CriticalSection(SpinLock& lock, F&& body)
@@ -319,6 +250,115 @@ namespace Comet
 		lock.Lock(node);
 		body();
 		lock.Unlock(node);
+	}
+
+	template <typename F>
+	bool DispatchLambda(F&& fn, TaskOptions options = {})
+	{
+		struct Context { F fn; Fence fence; };
+		Context c = { std::forward<F>(fn), Fence() };
+		bool r = Dispatch([](void* ptr)
+		{
+			auto& ctx_ref = *(Context*)ptr;
+			F fn = std::move(ctx_ref.fn);
+			ctx_ref.fence.Signal();
+			fn();
+		}, &c, options);
+		if (r)
+		{
+			c.fence.Await();
+			c.fence.Reset();
+		}
+		return r;
+	}
+
+	template <typename I, typename J>
+	bool ForEach(I begin, J end, void(*body)(I value), TaskOptions options = {})
+	{
+		using F = decltype(body);
+		if (begin == end)
+			return true;
+		assert(end > begin);
+		struct Context { F fn; I it; Fence fence; };
+		Context c = { body, begin, Fence() };
+		for (; c.it < end; ++c.it)
+		{
+			auto code = Dispatch([](void* ptr)
+			{
+				auto& ctx_ref = *(Context*)ptr;
+				auto fn = ctx_ref.fn;
+				auto it = ctx_ref.it;
+				ctx_ref.fence.Signal();
+				fn(it);
+			}, &c, options);
+			switch (code)
+			{
+			case DispatchResult::Success:
+				c.fence.Await();
+				c.fence.Reset();
+				break;
+			case DispatchResult::Sequential:
+				break;
+			case DispatchResult::Failure:
+				return false;
+			default:
+				assert(0);
+			}
+		}
+		return true;
+	}
+
+	namespace Impl
+	{
+		template <typename T>
+		constexpr bool is_lambda = !(
+			std::is_trivially_constructible_v<T> &&
+			std::is_trivially_copyable_v<T> &&
+			std::is_trivially_destructible_v<T> &&
+			std::is_class_v<T> &&
+			std::is_empty_v<T>);
+
+		template <typename T>
+		using enable_if_lambda = std::enable_if_t<is_lambda<T>>;
+	}
+
+	template <typename I, typename J, typename F, typename = Impl::enable_if_lambda<F>>
+	bool ForEach(I begin, J end, F&& body, TaskOptions options = {})
+	{
+		if (begin == end)
+			return true;
+		assert(end > begin);
+		struct Context { F fn; I it; Fence fence; };
+		Context c = { std::forward<F>(body), begin, Fence() };
+		assert(options.counter == nullptr);
+		Counter ctr = end - begin;
+		options.counter = &ctr;
+		for (; c.it < end; ++c.it)
+		{
+			auto code = Dispatch([](void* ptr)
+			{
+				auto& ctx = *(Context*)ptr;
+				I it = ctx.it;
+				ctx.fence.Signal();
+				ctx.fn(it);
+			}, &c, options);
+
+			switch (code)
+			{
+			case DispatchResult::Success:
+				c.fence.Await();
+				c.fence.Reset();
+				break;
+			case DispatchResult::Sequential:
+				break;
+			case DispatchResult::Failure:
+				return false;
+			default:
+				assert(0);
+			}
+		}
+		ctr.Await();
+		return true;
 	}
 }
 #endif
@@ -471,6 +511,11 @@ namespace Comet
 		uint32_t first, second;
 	};
 
+	struct COMET_SHARED_ATTR TaskFreeList
+	{
+		atomic<IndexPair> head;
+	};
+
 	struct CounterState
 	{
 		std::atomic<uint64_t> counter;
@@ -511,6 +556,22 @@ namespace Comet
 		Resuming,
 	};
 
+#ifdef COMET_DEBUG
+	COMET_NOINLINE static
+	void CustomAssertHandler(std::string_view text)
+	{
+		static atomic<bool> flag;
+		COMET_DEBUGTRAP;
+		if (!flag.exchange(true, std::memory_order_acquire))
+			Debug::Error(text);
+		abort();
+	}
+#define COMET_SYMBOL_TO_STRING(E) #E
+#define COMET_ASSERT(E) if (!(E)) CustomAssertHandler("Debug assertion failed. Expression: \"" COMET_SYMBOL_TO_STRING(E) "\".");
+#else
+#define COMET_ASSERT(E)
+#endif
+
 	namespace OS
 	{
 		COMET_INLINE static void* Malloc(size_t n)
@@ -520,7 +581,8 @@ namespace Comet
 
 		COMET_INLINE static void Free(void* p, size_t n)
 		{
-			VirtualFree(p, 0, MEM_RELEASE);
+			bool flag = VirtualFree(p, 0, MEM_RELEASE);
+			COMET_ASSERT(flag);
 		}
 
 		COMET_INLINE static ThreadHandle NewThread(ThreadEntryPoint fn, ThreadParam param, size_t stack_size, size_t affinity)
@@ -589,23 +651,6 @@ namespace Comet
 		}
 #endif
 	}
-
-#ifdef COMET_DEBUG
-	COMET_NOINLINE static
-	void CustomAssertHandler(std::string_view text)
-	{
-		static atomic<bool> flag;
-		COMET_DEBUGTRAP;
-		if (!flag.exchange(true, std::memory_order_acquire))
-			Debug::Error(text);
-		if (this_thread != nullptr)
-			OS::KillThread(*this_thread);
-	}
-#define COMET_SYMBOL_TO_STRING(E) #E
-#define COMET_ASSERT(E) if (!(E)) CustomAssertHandler("Debug assertion failed. Expression: \"" COMET_SYMBOL_TO_STRING(E) "\".");
-#else
-#define COMET_ASSERT(E)
-#endif
 
 	namespace Task
 	{
@@ -692,7 +737,7 @@ namespace Comet
 	static uint32_t rng_mod_mask;
 	static uint64_t reseed_threshold;
 	COMET_SHARED_ATTR static atomic<uint32_t> task_pool_bump;
-	COMET_SHARED_ATTR static atomic<IndexPair> task_pool_dirty;
+	COMET_SHARED_ATTR static atomic<IndexPair> task_pool_flist;
 
 	template <typename T>
 	COMET_FLATTEN static T& NonAtomicRef(atomic<T>& source)
@@ -749,6 +794,14 @@ namespace Comet
 			return x;
 		}
 
+		COMET_FLATTEN static uint64_t Romu2Jr(uint64_t* state)
+		{
+			auto r = state[0];
+			state[0] = state[1] * 15241094284759029579;
+			state[1] = COMET_ROL64(state[1] - r, 27);
+			return r;
+		}
+
 		template <typename T>
 		COMET_FLATTEN static void AddEntropyInner(uint32_t index, T a)
 		{
@@ -794,7 +847,7 @@ namespace Comet
 			here.last_reseed = Time::Get();
 		}
 
-		COMET_INLINE static uint32_t GetRandomThreadIndex()
+		COMET_INLINE static uint32_t Get()
 		{
 			uint64_t x;
 			if (this_thread == nullptr)
@@ -806,11 +859,14 @@ namespace Comet
 				auto& here = *this_thread;
 				if (Time::Get() - here.last_reseed > reseed_threshold)
 					ReseedThread(here);
-				x = here.romu2jr[0];
-				here.romu2jr[0] = here.romu2jr[1] * 15241094284759029579;
-				here.romu2jr[1] = COMET_ROL64(here.romu2jr[1] - x, 27);
+				x = Romu2Jr(here.romu2jr);
 			}
-			uint32_t n = (uint32_t)(x ^ (x >> 32));
+			return (uint32_t)(x ^ (x >> 32));
+		}
+
+		COMET_INLINE static uint32_t GetRandomThreadIndex()
+		{
+			uint32_t n = Get();
 			n *= max_threads;
 			n >>= 16;
 			n &= rng_mod_mask;
@@ -823,10 +879,10 @@ namespace Comet
 	{
 		for (;; COMET_SPIN)
 		{
-			auto prior = task_pool_dirty.load(std::memory_order_acquire);
+			auto prior = task_pool_flist.load(std::memory_order_acquire);
 			if (prior.first == UINT32_MAX)
 				break;
-			if (task_pool_dirty.compare_exchange_weak(prior, { task_contexts[prior.first].next, prior.second + 1 }, std::memory_order_acquire, std::memory_order_relaxed))
+			if (task_pool_flist.compare_exchange_weak(prior, { task_contexts[prior.first].next, prior.second + 1 }, std::memory_order_acquire, std::memory_order_relaxed))
 				return prior.first;
 		}
 		auto n = task_pool_bump.fetch_add(1, std::memory_order_acquire);
@@ -840,9 +896,9 @@ namespace Comet
 		auto& task = task_contexts[index];
 		for (;; COMET_SPIN)
 		{
-			auto prior = task_pool_dirty.load(std::memory_order_acquire);
+			auto prior = task_pool_flist.load(std::memory_order_acquire);
 			task.next = prior.first;
-			if (task_pool_dirty.compare_exchange_weak(prior, { index, prior.second + 1 }, std::memory_order_release, std::memory_order_relaxed))
+			if (task_pool_flist.compare_exchange_weak(prior, { index, prior.second + 1 }, std::memory_order_release, std::memory_order_relaxed))
 				break;
 		}
 	}
@@ -963,6 +1019,21 @@ namespace Comet
 		OS::Free(thread_contexts, buffer_size);
 	}
 
+	InitOptions InitOptions::Default()
+	{
+		InitOptions r = {};
+		r.thread_stack_size = 1 << 16;
+		r.task_stack_size = r.thread_stack_size;
+#ifdef _WIN32
+		SYSTEM_INFO info;
+		GetSystemInfo(&info);
+		r.max_threads = info.dwNumberOfProcessors;
+#endif
+		r.max_tasks = r.max_threads * 256;
+		r.reseed_threshold_ms = 4000;
+		return r;
+	}
+
 	bool Init()
 	{
 		return Init(InitOptions::Default());
@@ -996,7 +1067,7 @@ namespace Comet
 				bump += qn;
 			}
 		}
-		NonAtomicRef(task_pool_dirty) = { UINT32_MAX, 0 };
+		NonAtomicRef(task_pool_flist) = { UINT32_MAX, 0 };
 		NonAtomicRef(task_pool_bump) = 0;
 		reseed_threshold = Time::GetReseedThreshold(options.reseed_threshold_ms);
 		return SwitchState<SchedulerState::Initializing, SchedulerState::Running>();
@@ -1078,21 +1149,33 @@ namespace Comet
 		return this_thread != nullptr;
 	}
 
-	bool Dispatch(void(*fn)(void* param), void* param)
+	DispatchResult Dispatch(void(*fn)(void* param), void* param)
 	{
 		return Dispatch(fn, param, {});
 	}
 
-	bool Dispatch(void(*fn)(void* param), void* param, TaskOptions options)
+	DispatchResult Dispatch(void(*fn)(void* param), void* param, TaskOptions options)
 	{
-		uint32_t index;
-		while (true)
+		auto index = AcquireTask();
+		if (index == UINT32_MAX)
 		{
-			index = AcquireTask();
-			if (index != UINT32_MAX)
+			switch (options.error_policy)
+			{
+			case DispatchErrorPolicy::RunSequentially:
+				fn(param);
+				if (options.counter != nullptr)
+					options.counter->Decrement();
+				return DispatchResult::Sequential;
+			case DispatchErrorPolicy::Spin:
+				for (;; COMET_SPIN)
+					if (index = AcquireTask(); index == UINT32_MAX)
+						break;
 				break;
-			if (index == UINT32_MAX && !options.force_acquire)
-				return false;
+			case DispatchErrorPolicy::Return:
+				return DispatchResult::Failure;
+			default:
+				abort();
+			}
 		}
 		auto& task = task_contexts[index];
 		if (task.handle == nullptr)
@@ -1103,14 +1186,53 @@ namespace Comet
 		task.counter = options.counter;
 		task.next = UINT32_MAX;
 		if (options.preferred_thread != nullptr)
-			return PushTask(thread_contexts[*options.preferred_thread], task, index);
+		{
+			if (!PushTask(thread_contexts[*options.preferred_thread], task, index))
+			{
+				switch (options.error_policy)
+				{
+				case DispatchErrorPolicy::RunSequentially:
+					fn(param);
+					if (options.counter != nullptr)
+						options.counter->Decrement();
+					return DispatchResult::Sequential;
+				case DispatchErrorPolicy::Spin:
+					while (!PushTask(thread_contexts[*options.preferred_thread], task, index))
+						COMET_SPIN;
+					break;
+				case DispatchErrorPolicy::Return:
+					return DispatchResult::Failure;
+				default:
+					abort();
+				}
+			}
+		}
 		else
 		{
 			auto target = this_thread;
 			if (target == nullptr)
 				target = thread_contexts + RNG::GetRandomThreadIndex();
-			return PushTask(*target, task, index);
+			if (!PushTask(*target, task, index))
+			{
+				switch (options.error_policy)
+				{
+				case DispatchErrorPolicy::RunSequentially:
+					fn(param);
+					if (options.counter != nullptr)
+						options.counter->Decrement();
+					return DispatchResult::Sequential;
+				case DispatchErrorPolicy::Spin:
+					while (!PushTask(thread_contexts[RNG::GetRandomThreadIndex()], task, index))
+						COMET_SPIN;
+					break;
+				case DispatchErrorPolicy::Return:
+					return DispatchResult::Failure;
+				default:
+					abort();
+				}
+			}
 		}
+		return DispatchResult::Success;
 	}
 
 	void Yield()
@@ -1151,15 +1273,9 @@ namespace Comet
 	void Fence::Signal()
 	{
 		auto& self = *(atomic<uint32_t>*)this;
-		uint32_t index;
-		for (;; COMET_SPIN)
-		{
-			if (this_thread != nullptr && this_thread->quit_flag)
-				OS::ExitThread();
-			index = self.load(std::memory_order_acquire);
-			if (index != UINT32_MAX)
-				break;
-		}
+		auto index = self.load(std::memory_order_acquire);
+		if (index == UINT32_MAX)
+			return;
 		auto& task = task_contexts[index];
 		while (task.sleeping != 2)
 			COMET_SPIN;
@@ -1358,21 +1474,6 @@ namespace Comet
 			error_fn = callback;
 			error_ctx = context;
 		}
-	}
-
-	InitOptions InitOptions::Default()
-	{
-		InitOptions r = {};
-		r.thread_stack_size = 1 << 16;
-		r.task_stack_size = r.thread_stack_size;
-#ifdef _WIN32
-		SYSTEM_INFO info;
-		GetSystemInfo(&info);
-		r.max_threads = info.dwNumberOfProcessors;
-#endif
-		r.max_tasks = r.max_threads * 256;
-		r.reseed_threshold_ms = 1000;
-		return r;
 	}
 
 	namespace RCU
