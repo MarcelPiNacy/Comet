@@ -479,7 +479,7 @@ namespace Comet
 		uint64_t romu2jr[2];
 		uint64_t next_reseed;
 		uint32_t yield_counter;
-		uint8_t reseed_count;
+		uint32_t reseed_counter;
 		uint8_t quit_flag;
 #ifdef COMET_NO_BUSY_WAIT
 		uint32_t last_counter;
@@ -833,14 +833,14 @@ namespace Comet
 
 		COMET_NOINLINE static void ReseedThread(ThreadContext& here)
 		{
-			++here.reseed_count;
+			++here.reseed_counter;
 			auto x = here.romu2jr[0] ^ here.romu2jr[1];
 #ifndef COMET_NO_RDRAND
 			uint64_t y = 0;
 			(void)_rdrand64_step(&y);
 			x ^= y;
 #endif
-			for (uint8_t i = 0; i != (COMET_CTZ32(here.reseed_count) & POOL_MASK); ++i)
+			for (uint8_t i = 0; i != (COMET_CTZ32(here.reseed_counter) & POOL_MASK); ++i)
 				x += pools[i].hash.load(std::memory_order_relaxed);
 			if (x == 0)
 				x = 0x09E667F3BCC908B2F;
@@ -907,12 +907,14 @@ namespace Comet
 
 	COMET_FLATTEN static uint32_t PopTask(ThreadContext& thread)
 	{
+		uint32_t m = 16;
 		while (true)
 		{
 #ifdef COMET_NO_BUSY_WAIT
 			thread.last_counter = thread.counter.load(std::memory_order_relaxed);
 #endif
-			for (uint32_t n = 0; n != 64; ++n)
+			uint8_t n = 0;
+			do
 			{
 				for (auto& q : thread.queues)
 				{
@@ -922,14 +924,16 @@ namespace Comet
 						continue;
 					if (q.values[q.tail].load(std::memory_order_acquire) == UINT32_MAX)
 						continue;
-					auto r = q.values[q.tail].exchange(UINT32_MAX, std::memory_order_relaxed);
+					auto r = q.values[q.tail].exchange(UINT32_MAX, std::memory_order_acquire);
 					++q.tail;
 					if (q.tail == queue_capacity)
 						q.tail = 0;
 					(void)q.size.fetch_sub(1, std::memory_order_release);
 					return r;
 				}
-			}
+				++n;
+			} while (n < m);
+			m /= 2;
 #ifdef COMET_NO_BUSY_WAIT
 			OS::FutexAwait(thread.counter, thread.last_counter);
 #endif
@@ -973,7 +977,6 @@ namespace Comet
 			auto fn = here.this_task->fn;
 			Task::Switch(here.root_task_handle, here.this_task->handle);
 			++here.yield_counter;
-			RNG::AddEntropy(Time::Get(), here.this_task->param, fn);
 			if (here.this_task->fn != nullptr)
 			{
 				COMET_INVARIANT(here.this_task->sleeping != 2);
@@ -989,6 +992,7 @@ namespace Comet
 			}
 			else
 			{
+				RNG::AddEntropy(Time::Get(), here.this_task->param, fn);
 				if (here.this_task->counter != nullptr)
 					here.this_task->counter->Decrement();
 				ReleaseTask(index);
