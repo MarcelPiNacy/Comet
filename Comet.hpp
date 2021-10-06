@@ -150,7 +150,9 @@ namespace Comet
 	{
 		uint32_t thread_stack_size;
 		uint32_t task_stack_size;
+#ifndef COMET_FIXED_PROCESSOR_COUNT
 		uint32_t max_threads;
+#endif
 		uint32_t max_tasks;
 		uint64_t reseed_threshold_ns;
 		const uint32_t* affinity_indices;
@@ -185,7 +187,15 @@ namespace Comet
 	uint64_t		ThisTaskID();
 	uint32_t		WorkerThreadIndex();
 	uint32_t		MaxTasks();
+
+#ifndef COMET_FIXED_PROCESSOR_COUNT
 	uint32_t		WorkerThreadCount();
+#else
+	constexpr uint32_t WorkerThreadCount()
+	{
+		return COMET_FIXED_PROCESSOR_COUNT;
+	}
+#endif
 
 	namespace Debug
 	{
@@ -734,13 +744,7 @@ namespace Comet
 
 	constexpr uint8_t ConstexprLog2(uint32_t k)
 	{
-		constexpr uint8_t lookup[] =
-		{
-			 0,  9,  1, 10, 13, 21,  2, 29,
-			11, 14, 16, 18, 22, 25,  3, 30,
-			 8, 12, 20, 28, 15, 17, 24,  7,
-			19, 27, 23,  6, 26,  5,  4, 31
-		};
+		constexpr uint8_t lookup[] = { 0, 9, 1, 10, 13, 21, 2, 29, 11, 14, 16, 18, 22, 25, 3, 30, 8, 12, 20, 28, 15, 17, 24, 7, 19, 27, 23, 6, 26, 5, 4, 31 };
 		k |= k >> 1;
 		k |= k >> 2;
 		k |= k >> 4;
@@ -749,12 +753,20 @@ namespace Comet
 		return lookup[(uint32_t)(k * 0x07C4ACDD) >> 27];
 	}
 
+#ifndef COMET_FIXED_PROCESSOR_COUNT
 	static ThreadContext* thread_contexts;
+#else
+	static ThreadContext thread_contexts[COMET_FIXED_PROCESSOR_COUNT];
+#endif
 	static TaskContext* task_contexts;
 	static uint64_t reseed_threshold;
 	static uint32_t thread_stack_size;
 	static uint32_t task_stack_size;
+#ifndef COMET_FIXED_PROCESSOR_COUNT
 	static uint32_t max_threads;
+#else
+	static constexpr uint32_t max_threads = COMET_FIXED_PROCESSOR_COUNT;
+#endif
 	static uint32_t max_tasks;
 	static uint32_t queue_capacity;
 	static uint8_t max_threads_log2;
@@ -817,21 +829,19 @@ namespace Comet
 		template <typename T>
 		COMET_FLATTEN static uint64_t Mix(T value)
 		{
-			auto n = (uint64_t)value;
-			n ^= COMET_ROL64(n + 0xd6e8feb86659fd93, 16);
-			return n;
+			return (size_t)value;
 		}
 
 		template <typename T, typename... U>
 		COMET_FLATTEN static uint64_t Mix(T value, U... remaining)
 		{
-			return Mix(value) ^ Mix(remaining...);
+			return (size_t)value + Mix(remaining...);
 		}
 
 		template <typename... T>
 		COMET_FLATTEN static void AddEntropy(T... data)
 		{
-			pools[(this_thread - thread_contexts) & POOL_MASK].hash.fetch_xor(Mix(data...), std::memory_order_relaxed);
+			pools[(this_thread - thread_contexts) & POOL_MASK].hash.fetch_xor(IntHash64(Mix(data...)), std::memory_order_relaxed);
 		}
 
 		COMET_NOINLINE static void ReseedThread(ThreadContext& here)
@@ -1005,7 +1015,7 @@ namespace Comet
 			}
 			else
 			{
-				RNG::AddEntropy(here.local_accumulator);
+				RNG::AddEntropy(here.local_accumulator, here.this_task, here.yield_counter);
 				if (here.this_task->counter != nullptr)
 					here.this_task->counter->Decrement();
 				ReleaseTask(index);
@@ -1045,12 +1055,14 @@ namespace Comet
 		InitOptions r = {};
 		r.thread_stack_size = 1 << 16;
 		r.task_stack_size = r.thread_stack_size;
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(COMET_FIXED_PROCESSOR_COUNT)
 		SYSTEM_INFO info;
 		GetSystemInfo(&info);
 		r.max_threads = info.dwNumberOfProcessors;
-#endif
 		r.max_tasks = r.max_threads * 256;
+#else
+		r.max_tasks = COMET_FIXED_PROCESSOR_COUNT * 256;
+#endif
 		r.reseed_threshold_ns = UINT32_MAX; // ~4s
 		return r;
 	}
@@ -1065,21 +1077,32 @@ namespace Comet
 		if (!SwitchState<SchedulerState::Uninitialized, SchedulerState::Initializing>())
 			return false;
 		COMET_INVARIANT(options.max_tasks != 0);
+#ifndef COMET_FIXED_PROCESSOR_COUNT
 		COMET_INVARIANT(options.max_threads != 0);
+#endif
 		COMET_INVARIANT(options.reseed_threshold_ns != 0);
 		COMET_INVARIANT(options.task_stack_size != 0);
 		COMET_INVARIANT(options.thread_stack_size != 0);
+#ifndef COMET_FIXED_PROCESSOR_COUNT
 		max_threads = options.max_threads;
+#endif
 		max_tasks = options.max_tasks;
 		queue_capacity = 1U << (31 - COMET_CLZ32((max_tasks / max_threads) - 1));
 		queue_capacity_log2 = 31 - COMET_CLZ32(queue_capacity);
 		max_threads_log2 = 31 - COMET_CLZ32(max_threads);
+#ifndef COMET_FIXED_PROCESSOR_COUNT
 		size_t buffer_size =
 			sizeof(ThreadContext) * max_threads +
-			(size_t)queue_capacity * max_threads * MAX_PRIORITY * sizeof(atomic<uint32_t>) +
+			sizeof(atomic<uint32_t>) * queue_capacity * max_threads * MAX_PRIORITY +
 			sizeof(TaskContext) * max_tasks;
 		thread_contexts = (ThreadContext*)OS::Malloc(buffer_size);
 		task_contexts = (TaskContext*)(thread_contexts + max_threads);
+#else
+		size_t buffer_size =
+			sizeof(atomic<uint32_t>) * queue_capacity * max_threads * MAX_PRIORITY +
+			sizeof(TaskContext) * max_tasks;
+		task_contexts = (TaskContext*)OS::Malloc(buffer_size);
+#endif
 		task_stack_size = options.task_stack_size;
 		uint8_t* bump = (uint8_t*)(task_contexts + max_tasks);
 		auto qn = sizeof(atomic<uint32_t>) * queue_capacity;
@@ -1299,10 +1322,12 @@ namespace Comet
 		return max_tasks;
 	}
 
+#ifndef COMET_FIXED_PROCESSOR_COUNT
 	uint32_t WorkerThreadCount()
 	{
 		return max_threads;
 	}
+#endif
 
 	void Fence::Signal()
 	{
