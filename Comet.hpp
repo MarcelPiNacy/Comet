@@ -263,23 +263,30 @@ namespace Comet
 	}
 
 	template <typename F>
-	bool DispatchLambda(F&& fn, TaskOptions options = {})
+	auto Dispatch(F&& fn, TaskOptions options = {})
 	{
 		struct Context { F fn; Fence fence; };
 		Context c = { std::forward<F>(fn), Fence() };
-		bool r = Dispatch([](void* ptr)
+		auto code = Dispatch([](void* ptr)
 		{
 			auto& ctx_ref = *(Context*)ptr;
 			F fn = std::move(ctx_ref.fn);
 			ctx_ref.fence.Signal();
 			fn();
 		}, &c, options);
-		if (r)
+		switch (code)
 		{
+		case DispatchResult::Success:
 			c.fence.Await();
 			c.fence.Reset();
+			break;
+		case DispatchResult::Sequential:
+		case DispatchResult::Failure:
+			break;
+		default:
+			assert(0);
 		}
-		return r;
+		return code;
 	}
 
 	template <typename I, typename J>
