@@ -14,77 +14,116 @@
 #ifndef COMET_INCLUDED
 #define COMET_INCLUDED
 
+
+
 #if ((defined(__clang__) || defined(__GNUC__)) && !defined(NDEBUG)) || (defined(_MSVC_LANG) && defined(_DEBUG))
-#define COMET_DEBUG
+	#define COMET_DEBUG
 #endif
+
+
 
 #ifndef COMET_DEBUG
-#ifdef __has_attribute
-#if __has_attribute(always_inline)
-#define COMET_INLINE __attribute__((always_inline))
+
+	#ifdef __has_attribute
+
+		#if __has_attribute(always_inline)
+			#define COMET_INLINE __attribute__((always_inline))
+		#else
+			#define COMET_INLINE
+		#endif
+
+		#if __has_attribute(flatten)
+			#define COMET_FLATTEN __attribute__((flatten))
+		#else
+			#define COMET_FLATTEN
+		#endif
+
+		#if __has_attribute(noinline)
+			#define COMET_NOINLINE __attribute__((noinline))
+		#else
+			#define COMET_NOINLINE
+		#endif
+
+	#elif defined(_MSVC_LANG)
+		#define COMET_INLINE __forceinline
+		#define COMET_FLATTEN COMET_INLINE
+		#define COMET_NOINLINE __declspec(noinline)
+	#else
+		#define COMET_INLINE
+		#define COMET_FLATTEN
+		#define COMET_NOINLINE
+	#endif
+
 #else
-#define COMET_INLINE
-#endif
-#if __has_attribute(flatten)
-#define COMET_FLATTEN __attribute__((flatten))
-#else
-#define COMET_FLATTEN
-#endif
-#if __has_attribute(noinline)
-#define COMET_NOINLINE __attribute__((noinline))
-#else
-#define COMET_NOINLINE
-#endif
-#elif defined(_MSVC_LANG)
-#define COMET_INLINE __forceinline
-#define COMET_FLATTEN COMET_INLINE
-#define COMET_NOINLINE __declspec(noinline)
-#endif
-#else
-#define COMET_INLINE inline
-#define COMET_FLATTEN
-#define COMET_NOINLINE
+
+	#define COMET_INLINE inline
+	#define COMET_FLATTEN
+	#define COMET_NOINLINE
+
 #endif
 
+
+
 #ifdef __has_builtin
-#if __has_builtin(__builtin_debugtrap) && !defined(COMET_DEBUG)
-#define COMET_DEBUGTRAP __builtin_debugtrap()
-#else
-#define COMET_DEBUGTRAP
-#endif
-#if __has_builtin(__builtin_unreachable)
-#define COMET_UNREACHABLE __builtin_unreachable()
-#else
-#define COMET_UNREACHABLE abort()
-#endif
-#if __has_builtin(__builtin_ia32_pause)
-#define COMET_SPIN __builtin_ia32_pause()
-#else
-#define COMET_SPIN 
-#endif
-#if __has_builtin(__builtin_expect)
-#define COMET_LIKELY_IF(...) if (__builtin_expect((__VA_ARGS__), 1))
-#define COMET_UNLIKELY_IF(...) if (__builtin_expect((__VA_ARGS__), 0))
-#else
-#define COMET_LIKELY_IF(...) if ((__VA_ARGS__))
-#define COMET_UNLIKELY_IF(...) if ((__VA_ARGS__))
-#endif
+
+	#if __has_builtin(__builtin_debugtrap) && !defined(COMET_DEBUG)
+		#define COMET_DEBUGTRAP __builtin_debugtrap()
+	#else
+		#define COMET_DEBUGTRAP
+	#endif
+	
+	#if __has_builtin(__builtin_unreachable)
+		#define COMET_UNREACHABLE __builtin_unreachable()
+	#else
+		#define COMET_UNREACHABLE abort()
+	#endif
+	
+	#if __has_builtin(__builtin_ia32_pause)
+		#define COMET_SPIN __builtin_ia32_pause()
+	#else
+		#define COMET_SPIN 
+	#endif
+	
+	#if __has_builtin(__builtin_expect)
+		#define COMET_LIKELY_IF(...) if (__builtin_expect((__VA_ARGS__), 1))
+		#define COMET_UNLIKELY_IF(...) if (__builtin_expect((__VA_ARGS__), 0))
+	#else
+		#define COMET_LIKELY_IF(...) if ((__VA_ARGS__))
+		#define COMET_UNLIKELY_IF(...) if ((__VA_ARGS__))
+	#endif
+
 #elif defined(_MSVC_LANG)
-#define COMET_DEBUGTRAP __debugbreak()
-#define COMET_UNREACHABLE __assume(0)
-#define COMET_SPIN
-#define COMET_LIKELY_IF(...) if ((__VA_ARGS__))
-#define COMET_UNLIKELY_IF(...) if ((__VA_ARGS__))
+
+	#define COMET_DEBUGTRAP __debugbreak()
+	#define COMET_UNREACHABLE __assume(0)
+	#define COMET_SPIN
+	#define COMET_LIKELY_IF(...) if ((__VA_ARGS__))
+	#define COMET_UNLIKELY_IF(...) if ((__VA_ARGS__))
+
 #endif
 
 #include <cstdint>
 #include <cassert>
 #include <type_traits>
+#include <string_view>
 
 #undef Yield
 
+
+
+
+
+
+#ifndef COMET_SLEEP_ON_IDLE
+#define COMET_SLEEP_ON_IDLE 0
+#endif
+
 #ifndef COMET_MAX_PRIORITY
 #define COMET_MAX_PRIORITY 4
+#endif
+
+#ifndef COMET_FIXED_PROCESSOR_COUNT
+#define COMET_FIXED_PROCESSOR_COUNT 0
 #endif
 
 
@@ -105,7 +144,7 @@ namespace Comet
 		ShuttingDown,
 		Finalizing,
 
-		MaxEnum
+		MaxEnum,
 	};
 
 
@@ -114,7 +153,9 @@ namespace Comet
 	{
 		Success,
 		Sequential,
-		Failure
+		Failure,
+
+		MaxEnum,
 	};
 
 
@@ -124,34 +165,80 @@ namespace Comet
 		RunSequentially,
 		Spin,
 		Return,
-		Abort
+		Abort,
+
+		MaxEnum,
 	};
 
 
 
-	struct Fence
+	enum class Implementation : uint8_t
+	{
+		Unimplemented,
+		WindowsFibers,
+		SetContext,
+
+		MaxEnum,
+	};
+
+
+
+	constexpr Implementation GetImplementation()
+	{
+		return Implementation::
+#ifdef _WIN32
+			WindowsFibers;
+#else
+			Unimplemented;
+#endif
+	};
+
+
+
+	constexpr std::string_view GetImplementationName()
+	{
+		return
+#ifdef _WIN32
+			"Windows Fibers";
+#else
+			"N/A";
+#endif
+	};
+
+
+
+	class Fence
 	{
 		uint32_t state;
 
-		constexpr Fence() : state(UINT32_MAX) { }
+	public:
+
+		constexpr Fence() :
+			state(UINT32_MAX)
+		{
+		}
+
 		~Fence() = default;
 
 		void Signal();
+
 		void Await();
 
-		constexpr void Reset()
-		{
-			state = UINT32_MAX;
-		}
+		void Reset();
 	};
 
 
 
-	struct Counter
+	class Counter
 	{
-		uint64_t state[2];
+		uint64_t x, y;
+	public:
 
-		constexpr Counter(uint64_t value) : state{ value, UINT64_MAX } { }
+		constexpr Counter(uint64_t value) :
+			x(value), y(UINT64_MAX)
+		{
+		}
+
 		~Counter() = default;
 
 		bool Decrement();
@@ -163,9 +250,10 @@ namespace Comet
 
 
 
-	struct Mutex
+	class Mutex
 	{
 		uint64_t state;
+	public:
 
 		void Lock();
 		bool IsLocked() const;
@@ -175,18 +263,25 @@ namespace Comet
 
 
 
-	struct MCSMutex
+	class MutexMCS
 	{
+		uintptr_t state;
+	public:
+
 		struct Node
 		{
 			Node* next = nullptr;
 			uint32_t index = UINT32_MAX;
 		};
 
-		uintptr_t state;
 
-		constexpr MCSMutex() : state() { }
-		~MCSMutex() = default;
+
+		constexpr MutexMCS() :
+			state()
+		{
+		}
+
+		~MutexMCS() = default;
 
 		void Lock(Node& node);
 		bool IsLocked() const;
@@ -198,8 +293,6 @@ namespace Comet
 
 	using DebugMessageFn = void(*)(void* context, const char* message, uint32_t size);
 		
-
-
 	struct DebugOptions
 	{
 		void* context;
@@ -208,21 +301,19 @@ namespace Comet
 		DebugMessageFn error;
 	};
 
-
-
 	struct InitOptions
 	{
+		static InitOptions Default();
+
 		uint32_t thread_stack_size;
 		uint32_t task_stack_size;
-#ifndef COMET_FIXED_PROCESSOR_COUNT
+#if COMET_FIXED_PROCESSOR_COUNT == 0
 		uint32_t max_threads;
 #endif
 		uint32_t max_tasks;
 		uint64_t reseed_threshold_ns;
 		const uint32_t* affinity_indices;
 		const DebugOptions* debug;
-
-		static InitOptions Default();
 	};
 
 
@@ -263,7 +354,7 @@ namespace Comet
 
 
 
-#ifndef COMET_FIXED_PROCESSOR_COUNT
+#if COMET_FIXED_PROCESSOR_COUNT == 0
 	uint32_t WorkerThreadCount();
 #else
 	constexpr uint32_t WorkerThreadCount() { return COMET_FIXED_PROCESSOR_COUNT; }
@@ -300,7 +391,6 @@ namespace Comet
 
 
 	template <typename T, typename F>
-	requires(std::is_same_v<T, MCSMutex>)
 	COMET_INLINE void CriticalSection(T& lock, F&& body)
 	{
 		lock.Lock();
@@ -311,9 +401,9 @@ namespace Comet
 
 
 	template <typename F>
-	COMET_INLINE void CriticalSection(MCSMutex& lock, F&& body)
+	COMET_INLINE void CriticalSection(MutexMCS& lock, F&& body)
 	{
-		MCSMutex::Node node;
+		MutexMCS::Node node;
 		lock.Lock(node);
 		body();
 		lock.Unlock(node);
@@ -324,8 +414,14 @@ namespace Comet
 	template <typename F>
 	COMET_INLINE auto Dispatch(F&& fn, TaskOptions options = {})
 	{
-		struct Context { F fn; Fence fence; };
+		struct Context
+		{
+			F fn;
+			Fence fence;
+		};
+		
 		Context c = { std::forward<F>(fn), Fence() };
+
 		auto code = Dispatch([](void* ptr)
 		{
 			auto& ctx_ref = *(Context*)ptr;
@@ -333,6 +429,7 @@ namespace Comet
 			ctx_ref.fence.Signal();
 			fn();
 		}, &c, options);
+
 		switch (code)
 		{
 		case DispatchResult::Success:
@@ -345,6 +442,7 @@ namespace Comet
 		default:
 			COMET_UNREACHABLE;
 		}
+
 		return code;
 	}
 
@@ -354,11 +452,19 @@ namespace Comet
 	COMET_INLINE bool ForEach(I begin, J end, void(*body)(I value), TaskOptions options = {})
 	{
 		using F = decltype(body);
+		
 		COMET_UNLIKELY_IF(begin == end)
 			return true;
+		
 		assert(end > begin);
-		struct Context { F fn; I it; Fence fence; };
+		
+		struct Context
+		{
+			F fn; I it; Fence fence;
+		};
+
 		Context c = { body, begin, Fence() };
+
 		for (; c.it < end; ++c.it)
 		{
 			auto code = Dispatch([](void* ptr)
@@ -369,6 +475,7 @@ namespace Comet
 				ctx_ref.fence.Signal();
 				fn(it);
 			}, &c, options);
+
 			switch (code)
 			{
 			case DispatchResult::Success:
@@ -402,17 +509,27 @@ namespace Comet
 
 
 	template <typename I, typename J, typename F>
-	requires(Detail::is_lambda<F>)
+	// requires(Detail::is_lambda<F>)
 	bool ForEach(I begin, J end, F&& body, TaskOptions options = {})
 	{
 		COMET_UNLIKELY_IF(begin == end)
 			return true;
+
 		assert(end > begin);
-		struct Context { F fn; I it; Fence fence; };
-		Context c = { std::forward<F>(body), begin, Fence() };
 		assert(options.counter == nullptr);
+
+		struct Context
+		{
+			F fn;
+			I it;
+			Fence fence;
+		};
+		
+		Context c = { std::forward<F>(body), begin, Fence() };
 		Counter ctr = end - begin;
+		
 		options.counter = &ctr;
+
 		for (; c.it < end; ++c.it)
 		{
 			auto code = Dispatch([](void* ptr)
@@ -437,6 +554,7 @@ namespace Comet
 				COMET_UNREACHABLE;
 			}
 		}
+
 		ctr.Await();
 		return true;
 	}
@@ -503,12 +621,6 @@ namespace Comet
 		return *(T*)&source;
 	}
 
-	template <typename F, typename... A>
-	COMET_NOINLINE static auto NoInline(F&& fn, A&&... args)
-	{
-		return fn(std::forward<A>(args)...);
-	}
-
 	COMET_INLINE static uint64_t WellonsMix64(uint64_t x)
 	{
 		x ^= x >> 32;
@@ -563,15 +675,6 @@ namespace Comet
 #ifdef _WIN32
 	using Context = HANDLE;
 #else
-	struct Context
-	{
-		struct alignas(16) XMM { uint64_t u64[2]; };
-
-		XMM xmm[10];
-		uintptr_t gpr[9];
-		uintptr_t* buffer;
-		uintptr_t* stack_ptr;
-	};
 #endif
 
 	struct TaskContext
@@ -605,14 +708,14 @@ namespace Comet
 		uint32_t reseed_counter;
 		uint32_t spinlock_next;
 		uint8_t quit_flag;
-#ifdef COMET_NO_BUSY_WAIT
+#if COMET_SLEEP_ON_IDLE
 		uint32_t last_counter;
 #endif
 		bool spinlock_flag;
 #ifdef COMET_DEBUG
 		bool yield_trap;
 #endif
-#ifdef COMET_NO_BUSY_WAIT
+#if COMET_SLEEP_ON_IDLE
 		COMET_SHARED_ATTR atomic<uint32_t> counter;
 #endif
 		COMET_SHARED_ATTR MPSCQueue queues[COMET_MAX_PRIORITY];
@@ -637,50 +740,6 @@ namespace Comet
 
 	static thread_local ThreadContext* this_thread;
 
-	namespace Debug
-	{
-		static void* context;
-		static DebugMessageFn info_fn, warning_fn, error_fn;
-		static constexpr auto format_buffer_size = 255;
-		static thread_local char format_buffer[256];
-
-		template <typename S>
-		COMET_INLINE static void Info(S&& message)
-		{
-			if (info_fn != nullptr)
-				info_fn(context, &message[0], sizeof(std::remove_cvref_t<S>) - 1);
-		}
-
-		template <typename S>
-		COMET_INLINE static void Warning(S&& message)
-		{
-			if (warning_fn != nullptr)
-				warning_fn(context, &message[0], sizeof(std::remove_cvref_t<S>) - 1);
-		}
-
-		template <typename S>
-		COMET_INLINE static void Error(S&& message)
-		{
-			if (error_fn != nullptr)
-				error_fn(context, &message[0], sizeof(std::remove_cvref_t<S>) - 1);
-		}
-
-		template <typename S, typename... T>
-		COMET_INLINE static void Info(S&& format, T&&... args)
-		{
-		}
-
-		template <typename S, typename... T>
-		COMET_INLINE static void Warning(S&& format, T&&... args)
-		{
-		}
-
-		template <typename S, typename... T>
-		COMET_INLINE static void Error(S&& format, T&&... args)
-		{
-		}
-	}
-
 	enum class TaskState : uint8_t
 	{
 		Uninitialized,
@@ -690,7 +749,7 @@ namespace Comet
 		Resuming,
 	};
 
-#ifndef COMET_FIXED_PROCESSOR_COUNT
+#if COMET_FIXED_PROCESSOR_COUNT == 0
 	static ThreadContext* thread_contexts;
 #else
 	static ThreadContext thread_contexts[COMET_FIXED_PROCESSOR_COUNT];
@@ -699,7 +758,7 @@ namespace Comet
 	static uint64_t reseed_threshold;
 	static uint32_t thread_stack_size;
 	static uint32_t task_stack_size;
-#ifndef COMET_FIXED_PROCESSOR_COUNT
+#if COMET_FIXED_PROCESSOR_COUNT == 0
 	static uint32_t max_threads;
 #else
 	static constexpr uint32_t max_threads = COMET_FIXED_PROCESSOR_COUNT;
@@ -719,7 +778,6 @@ namespace Comet
 	COMET_NOINLINE static void CustomAssertHandler(S&& text)
 	{
 		COMET_DEBUGTRAP;
-		Debug::Error(std::forward<S>(text));
 		abort();
 	}
 
@@ -762,7 +820,6 @@ namespace Comet
 			COMET_ASSERT(pthread_attr_setstacksize(&attr, thread_stack_size) == 0, "Failed to set thread stack size.");
 			COMET_ASSERT(pthread_create(&r, &attr, fn, arg) == 0, "Failed to create thread.");
 			pthread_attr_destroy(&attr);
-			Debug::Info("Created thread #{}...", (uintptr_t)arg);
 			return r;
 		}
 
@@ -1038,7 +1095,7 @@ namespace Comet
 		uint32_t m = 16;
 		while (true)
 		{
-#ifdef COMET_NO_BUSY_WAIT
+#if COMET_SLEEP_ON_IDLE
 			thread.last_counter = thread.counter.load(std::memory_order_relaxed);
 #endif
 			uint8_t n = 0;
@@ -1064,7 +1121,7 @@ namespace Comet
 				++n;
 			} while (n < m);
 			m /= 2;
-#ifdef COMET_NO_BUSY_WAIT
+#if COMET_SLEEP_ON_IDLE
 			thread.counter.wait(thread.last_counter, std::memory_order_acquire);
 #endif
 		}
@@ -1085,92 +1142,32 @@ namespace Comet
 		n = q.head.fetch_add(1, std::memory_order_acquire);
 		n = AdjustQueueIndex(n);
 		q.values[n].store(index, std::memory_order_release);
-#ifdef COMET_NO_BUSY_WAIT
+#if COMET_SLEEP_ON_IDLE
 		(void)thread.counter.fetch_add(1, std::memory_order_release);
 		thread.counter.notify_one();
 #endif
 		return true;
 	}
 
-#ifdef _WIN32
-#define COMET_SWITCH_CONTEXT(FROM, TO) SwitchToFiber(TO)
-#else
-	COMET_NAKED static void SwitchContextImpl(void* from, void* to)
+	template <typename E>
+	static void CreateContext(Context& c, E entry_point, void* parameter)
 	{
-#ifdef __x86_64__
-		asm volatile(
-			R"(
-			movq %rcx, 0(%rcx)
-			movq %rbx, 8(%rcx)
-			movq %rsi, 16(%rcx)
-			movq %rdi, 24(%rcx)
-			movq %rbp, 32(%rcx)
-			movq %r12, 40(%rcx)
-			movq %r13, 48(%rcx)
-			movq %r14, 64(%rcx)
-			movq %r15, 72(%rcx)
-
-			movq %rsp, (%rcx)
-			movq %rdx, %rsp
-
-			movq 72(%rcx), %r15
-			movq 64(%rcx), %r14
-			movq 48(%rcx), %r13
-			movq 40(%rcx), %r12
-			movq 32(%rcx), %rbp
-			movq 24(%rcx), %rdi
-			movq 16(%rcx), %rsi
-			movq 8(%rcx), %rbx
-			movq 0(%rcx), %rcx
-			ret)");
-#elif defined(__i386__)
-#error
-#endif
-	}
-#define COMET_SWITCH_CONTEXT(FROM, TO) SwitchContextImpl(&FROM, &TO)
-#endif
-
-	COMET_NOINLINE static void CreateContext(Context& c, TaskEntryPoint fn, void* arg)
-	{
-#ifdef _WIN32
-		c = CreateFiberEx(task_stack_size, task_stack_size, FIBER_FLAG_FLOAT_SWITCH, fn, arg);
-#else
-		c.buffer = (uintptr_t*)OS::Malloc(task_stack_size);
-		c.stack_ptr = c.buffer + (task_stack_size / sizeof(uintptr_t));
-		*(--c.stack_ptr) = (uintptr_t)fn;
-		*(--c.stack_ptr) = (uintptr_t)arg;
-#ifdef COMET_DEBUG
-		for (int i = 0; i != 9; ++i)
-			*(--c.stack_ptr) = 0xcdcdcdcdcdcdcdcd;
-#else
-		c.stack_ptr -= 9;
-#endif
-#endif
+		c = CreateFiberEx(task_stack_size, task_stack_size, FIBER_FLAG_FLOAT_SWITCH, entry_point, parameter);
 	}
 
-	COMET_INLINE static void DeleteContext(Context& c)
+	static void DestroyContext(Context& c)
 	{
-#ifdef _WIN32
 		DeleteFiber(c);
 		c = nullptr;
-#else
-		OS::Free(c.buffer, task_stack_size);
-		memset(&c, 0, sizeof(Context));
-#endif
 	}
 
-	COMET_INLINE static bool IsValidContext(Context& c)
+	static void SwapContext(Context& from, Context& to)
 	{
-#ifdef _WIN32
-		return c != nullptr;
-#else
-		return c.buffer != nullptr;
-#endif
+		SwitchToFiber(to);
 	}
 
 	static ThreadReturn COMET_THREAD_CALL ThreadMain(ThreadParam arg)
 	{
-		Debug::Info("Entered thread #{}", (uintptr_t)arg);
 		auto& here = thread_contexts[(uintptr_t)arg];
 #ifdef _WIN32
 		here.main_context = ConvertThreadToFiberEx(nullptr, FIBER_FLAG_FLOAT_SWITCH);
@@ -1184,8 +1181,7 @@ namespace Comet
 				break;
 			COMET_INVARIANT(index < max_tasks);
 			here.this_task = task_contexts + index;
-			Debug::Info("Entering task 0x{0:x}...", (uintptr_t)here.this_task);
-			COMET_SWITCH_CONTEXT(here.main_context, here.this_task->context);
+			SwapContext(here.main_context, here.this_task->context);
 			++here.yield_count;
 			if (here.this_task->fn != nullptr)
 			{
@@ -1208,7 +1204,6 @@ namespace Comet
 				ReleaseTask(index);
 			}
 		}
-		Debug::Info("Leaving thread #{}", (uintptr_t)arg);
 		return 0;
 	}
 
@@ -1222,7 +1217,7 @@ namespace Comet
 			COMET_INVARIANT(task.fn != nullptr);
 			task.fn(task.arg);
 			task.fn = nullptr;
-			COMET_SWITCH_CONTEXT(task.context, this_thread->main_context);
+			SwapContext(task.context, this_thread->main_context);
 		}
 		OS::ExitThread();
 	}
@@ -1230,7 +1225,7 @@ namespace Comet
 	COMET_INLINE static void FinalizeInner()
 	{
 		for (uint32_t i = 0; i != NonAtomicRef(task_pool_bump); ++i)
-			DeleteContext(task_contexts[i].context);
+			DestroyContext(task_contexts[i].context);
 		size_t buffer_size =
 			sizeof(ThreadContext) * max_threads +
 			sizeof(TaskContext) * max_tasks;
@@ -1242,7 +1237,7 @@ namespace Comet
 		InitOptions r = {};
 		r.thread_stack_size = 1U << 21;
 		r.task_stack_size = 1U << 16;
-#ifndef COMET_FIXED_PROCESSOR_COUNT
+#if COMET_FIXED_PROCESSOR_COUNT == 0
 #ifdef __FreeBSD__
 		r.max_threads = sysconf(_SC_NPROCESSORS_ONLN);
 #elif defined(_WIN32)
@@ -1263,53 +1258,35 @@ namespace Comet
 		COMET_UNLIKELY_IF(!SwitchState<SchedulerState::Uninitialized, SchedulerState::Initializing>())
 			return false;
 
-		if (options.debug != nullptr)
-		{
-			Debug::context =	options.debug->context;
-			Debug::info_fn =	options.debug->info;
-			Debug::Info("Registered debug info callback.");
-			Debug::warning_fn =	options.debug->warning;
-			Debug::Info("Registered debug warning callback.");
-			Debug::error_fn =	options.debug->error;
-			Debug::Info("Registered debug error callback.");
-		}
-
 		COMET_INVARIANT(options.max_tasks != 0);
-#ifndef COMET_FIXED_PROCESSOR_COUNT
+#if COMET_FIXED_PROCESSOR_COUNT == 0
 		COMET_INVARIANT(options.max_threads != 0);
 #endif
 		COMET_INVARIANT(options.reseed_threshold_ns != 0);
 		COMET_INVARIANT(options.task_stack_size != 0);
 		COMET_INVARIANT(options.thread_stack_size != 0);
-#ifndef COMET_FIXED_PROCESSOR_COUNT
+#if COMET_FIXED_PROCESSOR_COUNT == 0
 		max_threads = options.max_threads;
 #endif
-		Debug::Info("Setting max_threads to {}", max_threads);
 		max_tasks = options.max_tasks;
-		Debug::Info("Setting max_tasks to {}", max_tasks);
 		queue_capacity = 1U << (31 - std::countl_zero((max_tasks / max_threads) - 1));
-		Debug::Info("Setting queue_capacity to {}", queue_capacity);
 		queue_capacity_log2 = 31 - std::countl_zero(queue_capacity);
 		max_threads_log2 = 31 - std::countl_zero(max_threads);
-#ifndef COMET_FIXED_PROCESSOR_COUNT
+#if COMET_FIXED_PROCESSOR_COUNT == 0
 		size_t buffer_size =
 			sizeof(ThreadContext) * max_threads +
 			sizeof(atomic<uint32_t>) * queue_capacity * max_threads * COMET_MAX_PRIORITY +
 			sizeof(TaskContext) * max_tasks;
-		Debug::Info("Allocating {}B", buffer_size);
 		thread_contexts = (ThreadContext*)OS::Malloc(buffer_size);
 		task_contexts = (TaskContext*)(thread_contexts + max_threads);
 #else
 		size_t buffer_size =
 			sizeof(atomic<uint32_t>) * queue_capacity * max_threads * MAX_PRIORITY +
 			sizeof(TaskContext) * max_tasks;
-		Debug::Info("Allocating {}B", buffer_size);
 		task_contexts = (TaskContext*)OS::Malloc(buffer_size);
 #endif
 		task_stack_size = options.task_stack_size;
-		Debug::Info("Setting task_stack_size to {}", task_stack_size);
 		thread_stack_size = options.thread_stack_size;
-		Debug::Info("Setting thread_stack_size to {}", thread_stack_size);
 		uint8_t* bump = (uint8_t*)(task_contexts + max_tasks);
 		auto qn = sizeof(atomic<uint32_t>) * queue_capacity;
 		for (uint32_t i = 0; i != max_threads; ++i)
@@ -1357,7 +1334,7 @@ namespace Comet
 		{
 			auto& thread = thread_contexts[i];
 			thread.quit_flag = true;
-#ifdef COMET_NO_BUSY_WAIT
+#if COMET_SLEEP_ON_IDLE
 			(void)thread.counter.fetch_add(1, std::memory_order_release);
 			thread.counter.notify_one();
 #endif
@@ -1377,7 +1354,7 @@ namespace Comet
 		for (uint32_t i = 0; i != max_threads; ++i)
 		{
 			auto& thread = thread_contexts[i];
-#ifdef COMET_NO_BUSY_WAIT
+#if COMET_SLEEP_ON_IDLE
 			(void)thread.counter.fetch_add(1, std::memory_order_release);
 			thread.counter.notify_one();
 #endif
@@ -1411,7 +1388,6 @@ namespace Comet
 			switch (options.error_policy)
 			{
 			case DispatchErrorPolicy::RunSequentially:
-				Debug::Warning("Failed to allocate task, running sequentially...");
 				fn(arg);
 				if (options.counter != nullptr)
 					options.counter->Decrement();
@@ -1425,7 +1401,6 @@ namespace Comet
 				}
 				break;
 			case DispatchErrorPolicy::Return:
-				Debug::Warning("Failed to allocate task, returning DispatchResult::Failure.");
 				return DispatchResult::Failure;
 			default:
 				COMET_UNREACHABLE;
@@ -1500,7 +1475,7 @@ namespace Comet
 		auto mask = (uintptr_t)__builtin_return_address(0);
 #endif
 		this_thread->local_accumulator ^= ReduceMix(mask);
-		COMET_SWITCH_CONTEXT(this_thread->this_task->context, this_thread->main_context);
+		SwapContext(this_thread->this_task->context, this_thread->main_context);
 	}
 
 	void Exit()
@@ -1525,7 +1500,7 @@ namespace Comet
 		return max_tasks;
 	}
 
-#ifndef COMET_FIXED_PROCESSOR_COUNT
+#if COMET_FIXED_PROCESSOR_COUNT == 0
 	uint32_t WorkerThreadCount()
 	{
 		return max_threads;
@@ -1555,6 +1530,11 @@ namespace Comet
 		NonAtomicRef(self) = index;
 		this_thread->this_task->sleeping = 1;
 		Yield();
+	}
+	
+	void Fence::Reset()
+	{
+		state = UINT32_MAX;
 	}
 
 	bool Counter::Decrement()
@@ -1628,7 +1608,7 @@ namespace Comet
 		return self.counter.load(std::memory_order_relaxed);
 	}
 
-	void MCSMutex::Lock(Node& node)
+	void MutexMCS::Lock(Node& node)
 	{
 		auto& self = *(atomic<Node*>*)this;
 		node.index = (uint32_t)(this_thread->this_task - task_contexts);
@@ -1640,12 +1620,12 @@ namespace Comet
 		Yield();
 	}
 
-	bool MCSMutex::IsLocked() const
+	bool MutexMCS::IsLocked() const
 	{
 		return state != 0;
 	}
 
-	bool MCSMutex::TryLock(Node& node)
+	bool MutexMCS::TryLock(Node& node)
 	{
 		auto& self = *(atomic<Node*>*)this;
 		node.index = (uint32_t)(this_thread->this_task - task_contexts);
@@ -1653,7 +1633,7 @@ namespace Comet
 		return self.compare_exchange_weak(expected, &node, std::memory_order_acquire, std::memory_order_relaxed);
 	}
 
-	void MCSMutex::Unlock(Node& node)
+	void MutexMCS::Unlock(Node& node)
 	{
 		auto& self = *(atomic<Node*>*)this;
 		Node* expected = &node;
